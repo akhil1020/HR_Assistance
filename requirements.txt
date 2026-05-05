@@ -1,9 +1,11 @@
 langchain
-langgraph
+langchain-core
 langchain-community
+langgraph
 python-dotenv
 ipykernel
 fastapi[standard]
 pypdf
 faiss-cpu
-langchain-openai
+requests
+huggingface-hub

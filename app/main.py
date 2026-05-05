@@ -2,11 +2,12 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.upload_api import router as upload_router
+from app.api.chatbot_api import router as chatbot_router
 
 # Initialize FastAPI app
 app = FastAPI(
     title="HR Assistance API",
-    description="API for HR assistance and document processing",
+    description="API for HR assistance and document processing with Ollama chatbot",
     version="1.0.0"
 )
 
@@ -20,7 +21,8 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(upload_router, prefix="/api", tags=["upload"])
+app.include_router(upload_router, prefix="/api/upload", tags=["upload"])
+app.include_router(chatbot_router, prefix="/api/chat", tags=["chatbot"])
 
 # Health check endpoint
 @app.get("/health")

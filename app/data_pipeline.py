@@ -12,8 +12,7 @@ from langchain_community.vectorstores import FAISS
 
 
 # Configuration - Using pathlib for cross-platform path support
-# data_pipeline.py is at project root: e:\My_Projects\hr_assistance\data_pipeline.py
-BASE_DIR = Path(__file__).parent  # Project root (one level up)
+BASE_DIR = Path(__file__).parent.parent  # Project root
 UPLOAD_DIR = BASE_DIR / "app" / "data" / "uploads"
 VECTOR_DB_DIR = BASE_DIR / "app" / "data" / "hr_policy_vector_db"
 EMBEDDINGS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
