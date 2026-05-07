@@ -1,156 +1,100 @@
-"""FastAPI router for chatbot endpoints"""
+"""FastAPI router for HR chatbot — streaming responses from Pinecone + Ollama"""
 
+import json
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Optional
-
-from app.chatbot.chatbot import get_chatbot
+from langchain_ollama import OllamaLLM
+from app.data_pipeline import load_vector_store
 
 router = APIRouter()
 
+# ── Singletons — initialized once at startup ──────────────────────────────────
+_vector_store = load_vector_store()
 
-class ChatMessage(BaseModel):
-    """Chat message model"""
-    role: str
-    content: str
+# ── LLM ──────────────────────────────────────────────────────────────────────
+llm = OllamaLLM(
+    model="llama3.2",
+    base_url="http://localhost:11434",
+    temperature=0.3,
+)
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+PROMPT_TEMPLATE = """You are an HR policy assistant for the company.
+Your job is to answer employee questions ONLY using the provided HR policy context.
+you can accepts greeting and small talk but always try to steer the conversation towards HR policies and employee benefits.
+
+Rules:
+- Only use information from the provided context.
+- If the answer is not available in the context, say:
+  "I could not find this information in the HR policy documents."
+- Do not make up policies, benefits, rules, or numbers.
+- Keep answers professional, concise, and easy to understand.
+- If possible, mention the relevant policy section or document name.
+- If the policy is unclear or incomplete, clearly say so.
+- Do not provide legal advice.
+
+HR Policy Context:
+{context}
+
+Employee Question:
+{question}
+
+Answer:"""
 
 
+# ── SSE helper ────────────────────────────────────────────────────────────────
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
+# ── Schema ────────────────────────────────────────────────────────────────────
 class ChatRequest(BaseModel):
-    """Chat request model"""
-    query: str
-    model: Optional[str] = "llama2"
+    question: str
 
 
-class ChatResponse(BaseModel):
-    """Chat response model"""
-    answer: str
-    sources: List[Dict[str, str]]
-    model: str
-    has_context: bool
-    chat_history_length: Optional[int] = None
-
-
-class SearchRequest(BaseModel):
-    """Document search request"""
-    query: str
-    k: Optional[int] = 5
-
-
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """
-    Chat with the HR assistant
-
-    Args:
-        request: Chat request with query and model name
-
-    Returns:
-        Chat response with answer and sources
-    """
+# ── Stream generator ─────────────────────────────────────────────────────────
+def _stream(question: str):
     try:
-        chatbot = get_chatbot(model_name=request.model)
-        result = chatbot.answer(request.query)
-        return ChatResponse(**result)
-    except ConnectionError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Ollama service unavailable: {str(e)}"
-        )
+        docs = _vector_store.similarity_search(question, k=4)
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing chat: {str(e)}"
-        )
+        yield _sse({"type": "error", "content": f"Vector store unavailable: {e}"})
+        yield _sse({"type": "done"})
+        return
 
+    if not docs:
+        yield _sse({"type": "token", "content": "I don't have sufficient information in the HR policies to answer that."})
+        yield _sse({"type": "done"})
+        return
 
-@router.get("/chat/history")
-async def get_history():
-    """Get conversation history"""
+    context = "\n\n".join(doc.page_content for doc in docs)
+    sources = list({doc.metadata.get("source", "HR Policy") for doc in docs})
+    prompt = PROMPT_TEMPLATE.format(context=context, question=question)
+
     try:
-        chatbot = get_chatbot()
-        history = chatbot.get_conversation_history()
-        return {
-            "history": history,
-            "message_count": len(history)
-        }
+        for chunk in llm.stream(prompt):
+            yield _sse({"type": "token", "content": chunk})
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving history: {str(e)}"
-        )
+        yield _sse({"type": "error", "content": f"LLM unavailable: {e}"})
+        return
+
+    yield _sse({"type": "sources", "content": sources})
+    yield _sse({"type": "done"})
 
 
-@router.delete("/chat/history")
-async def clear_history():
-    """Clear conversation history"""
-    try:
-        chatbot = get_chatbot()
-        chatbot.clear_memory()
-        return {"message": "Conversation history cleared"}
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error clearing history: {str(e)}"
-        )
-
-
-@router.post("/search")
-async def search_documents(request: SearchRequest):
-    """
-    Search for relevant HR policy documents
-
-    Args:
-        request: Search request with query and number of results
-
-    Returns:
-        List of relevant documents with metadata
-    """
-    try:
-        chatbot = get_chatbot()
-        results = chatbot.search_documents(request.query, k=request.k)
-        return {
-            "query": request.query,
-            "results": results,
-            "count": len(results)
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error searching documents: {str(e)}"
-        )
-
-
-@router.post("/refresh-db")
-async def refresh_database():
-    """Refresh vector database after new documents are uploaded"""
-    try:
-        chatbot = get_chatbot()
-        chatbot.update_vector_db()
-        return {
-            "message": "Vector database refreshed successfully",
-            "has_context": chatbot.vector_db is not None
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error refreshing database: {str(e)}"
-        )
+# ── Endpoint ──────────────────────────────────────────────────────────────────
+@router.post("/")
+def chat(request: ChatRequest):
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    return StreamingResponse(
+        _stream(question),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/health")
-async def chatbot_health():
-    """Check chatbot health and Ollama connection"""
-    try:
-        chatbot = get_chatbot()
-        return {
-            "status": "healthy",
-            "model": chatbot.model_name,
-            "has_vector_db": chatbot.vector_db is not None,
-            "ollama_url": chatbot.ollama_base_url,
-            "embeddings_model": chatbot.embeddings_model
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Chatbot health check failed: {str(e)}"
-        )
+def health():
+    return {"status": "ok", "model": "llama3.2"}

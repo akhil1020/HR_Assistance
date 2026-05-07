@@ -9,5 +9,13 @@ wheels/
 # Virtual environments
 .venv
 
+# Envoronment variables
+.env
 
 testing.ipynb
+
+# Vector database
+app/data/hr_policy_vector_db/
+
+# Uploaded files
+app/data/uploads/

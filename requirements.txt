@@ -6,6 +6,9 @@ python-dotenv
 ipykernel
 fastapi[standard]
 pypdf
-faiss-cpu
+pinecone>=6.0.0
+langchain-pinecone>=0.2.0
 requests
 huggingface-hub
+langchain-ollama
+langchain-huggingface
