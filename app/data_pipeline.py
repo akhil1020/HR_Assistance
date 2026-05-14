@@ -29,8 +29,14 @@ PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Loaded once at import time — reused by every request
-_embeddings = HuggingFaceEmbeddings(model_name=EMBEDDINGS_MODEL)
+_embeddings: HuggingFaceEmbeddings | None = None
+
+
+def get_embeddings() -> HuggingFaceEmbeddings:
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(model_name=EMBEDDINGS_MODEL)
+    return _embeddings
 
 
 def _get_pinecone_client() -> Pinecone:
@@ -138,7 +144,7 @@ def upsert_to_pinecone(chunks: List[Dict[str, str]], source_file: str = "") -> P
 
     vector_store = PineconeVectorStore.from_documents(
         documents=lc_docs,
-        embedding=_embeddings,
+        embedding=get_embeddings(),
         index_name=PINECONE_INDEX_NAME,
         ids=ids,
     )
@@ -151,7 +157,7 @@ def load_vector_store() -> PineconeVectorStore:
     """Return a PineconeVectorStore connected to the existing index"""
     return PineconeVectorStore(
         index_name=PINECONE_INDEX_NAME,
-        embedding=_embeddings,
+        embedding=get_embeddings(),
     )
 
 

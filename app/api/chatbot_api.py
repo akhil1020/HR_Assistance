@@ -9,30 +9,48 @@ from app.data_pipeline import load_vector_store
 
 router = APIRouter()
 
-# ── Singletons — initialized once at startup ──────────────────────────────────
-_vector_store = load_vector_store()
+# ── Vector store (lazy singleton) ─────────────────────────────────────────────
+_vector_store = None
 
-# ── LLM ──────────────────────────────────────────────────────────────────────
+
+def _get_vector_store():
+    global _vector_store
+    if _vector_store is None:
+        _vector_store = load_vector_store()
+    return _vector_store
+
+
+# ── LLM — keep_alive stops Ollama unloading the model between requests ────────
 llm = OllamaLLM(
-    model="llama3.2",
+    model="gemma4",
     base_url="http://localhost:11434",
     temperature=0.3,
+    keep_alive="30m",   # keep model hot in Ollama for 30 minutes of inactivity
 )
+
+# ── Greetings — bypass RAG entirely for small talk ────────────────────────────
+_GREETINGS = {
+    "hi", "hii", "hello", "hey", "howdy",
+    "good morning", "good afternoon", "good evening", "good night",
+    "hi there", "hello there", "hey there",
+}
+
+GREETING_REPLY = (
+    "Hello! I'm your HR Policy Assistant. "
+    "Feel free to ask me anything about company policies — "
+    "leave, attendance, salary, conduct, safety, and more."
+)
+
+
+def _is_greeting(text: str) -> bool:
+    return text.lower().strip().rstrip("!.,") in _GREETINGS
+
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 PROMPT_TEMPLATE = """You are an HR policy assistant for the company.
-Your job is to answer employee questions ONLY using the provided HR policy context.
-you can accepts greeting and small talk but always try to steer the conversation towards HR policies and employee benefits.
-
-Rules:
-- Only use information from the provided context.
-- If the answer is not available in the context, say:
-  "I could not find this information in the HR policy documents."
-- Do not make up policies, benefits, rules, or numbers.
-- Keep answers professional, concise, and easy to understand.
-- If possible, mention the relevant policy section or document name.
-- If the policy is unclear or incomplete, clearly say so.
-- Do not provide legal advice.
+Answer the employee's question using ONLY the HR policy context provided below.
+If the answer is not in the context, say: "I could not find this information in the HR policy documents."
+Do not make up policies, benefits, rules, or numbers. Be concise and professional.
 
 HR Policy Context:
 {context}
@@ -53,21 +71,29 @@ class ChatRequest(BaseModel):
     question: str
 
 
-# ── Stream generator ─────────────────────────────────────────────────────────
+# ── Stream generator ──────────────────────────────────────────────────────────
 def _stream(question: str):
+    # Fast path: greetings get an instant canned reply — no Pinecone, no LLM
+    if _is_greeting(question):
+        yield _sse({"type": "token", "content": GREETING_REPLY})
+        yield _sse({"type": "done"})
+        return
+
+    # Retrieve relevant chunks from Pinecone
     try:
-        docs = _vector_store.similarity_search(question, k=4)
+        docs = _get_vector_store().similarity_search(question, k=3)
     except Exception as e:
         yield _sse({"type": "error", "content": f"Vector store unavailable: {e}"})
         yield _sse({"type": "done"})
         return
 
     if not docs:
-        yield _sse({"type": "token", "content": "I don't have sufficient information in the HR policies to answer that."})
+        yield _sse({"type": "token", "content": "I could not find this information in the HR policy documents."})
         yield _sse({"type": "done"})
         return
 
-    context = "\n\n".join(doc.page_content for doc in docs)
+    # Trim each chunk to 400 chars to keep the prompt compact
+    context = "\n\n".join(doc.page_content[:400] for doc in docs)
     sources = list({doc.metadata.get("source", "HR Policy") for doc in docs})
     prompt = PROMPT_TEMPLATE.format(context=context, question=question)
 
@@ -97,4 +123,4 @@ def chat(request: ChatRequest):
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "model": "llama3.2"}
+    return {"status": "ok", "model": "gemma4"}
